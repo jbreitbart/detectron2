@@ -8,6 +8,10 @@ import cv2
 import tqdm
 import pickle
 import json
+import os
+import sys
+
+from pathlib import Path
 
 from detectron2.config import get_cfg
 from detectron2.data.detection_utils import read_image
@@ -43,8 +47,6 @@ def get_parser():
         metavar="FILE",
         help="path to config file",
     )
-    parser.add_argument("--webcam", action="store_true", help="Take inputs from webcam.")
-    parser.add_argument("--video-input", help="Path to video file.")
     parser.add_argument(
         "--input",
         nargs="+",
@@ -53,8 +55,7 @@ def get_parser():
     )
     parser.add_argument(
         "--output",
-        help="A file or directory to save output visualizations. "
-        "If not given, will show output in an OpenCV window.",
+        help="A file or directory to save output visualizations."
     )
 
     parser.add_argument(
@@ -87,90 +88,55 @@ if __name__ == "__main__":
         if len(args.input) == 1:
             args.input = glob.glob(os.path.expanduser(args.input[0]))
             assert args.input, "The input path(s) was not found"
-        for path in tqdm.tqdm(args.input, disable=not args.output):
-            # use PIL, to be consistent with evaluation
-            img = read_image(path, format="BGR")
-            start_time = time.time()
-            predictions, visualized_output = demo.run_on_image(img)
-            logger.info(
-                "{}: {} in {:.2f}s".format(
-                    path,
-                    "detected {} instances".format(len(predictions["instances"]))
-                    if "instances" in predictions
-                    else "finished",
-                    time.time() - start_time,
-                )
-            )
 
-            if args.output:
-                if os.path.isdir(args.output):
-                    assert os.path.isdir(args.output), args.output
-                    out_filename = os.path.join(args.output, os.path.basename(path))
-                    out_filename_json = os.path.join(
-                        args.output, os.path.basename(path) + ".res")
+        assert len(args.input)==1, "You must provide one input directory"
+        assert os.path.isdir(args.input[0]), "Input must point to a directory"
+        
+        logger.info("Input is directory, recursively getting all directories in {}".format(args.input[0]))
+        subdirs = [x[0] for x in os.walk(args.input[0])]
+        logger.info("Found {}".format(subdirs)) 
+
+        for subdir in tqdm.tqdm(subdirs, position=0):
+            # check for .result_directory which indicates that this is not an input directory
+            # but an output directory from a previous run
+            if os.path.exists(subdir+"/.result_directory"):
+                logger.info("{} is a result directory, will be skipped".format(subdir))
+                continue
+
+            png_files = glob.glob(subdir+"/*.png")
+            logger.info("Found {} files in {}".format(len(png_files), subdir))
+            output_dir = subdir+"/"+args.output
+            if len(png_files)>0:
+                if os.path.exists(output_dir):
+                    if os.path.exists(output_dir+"/.result_directory"):
+                        logger.info("{} was already processed, will be skipped".format(subdir))
+                        continue
+                    else:
+                        logger.info("{} already contains the output directory, will be processed anyway and files may be overwritten".format(subdir))
                 else:
-                    assert len(args.input) == 1, "Please specify a directory with args.output"
-                    out_filename = args.output
-                    out_filename_json = os.path.join(args.output, ".res")
+                    os.mkdir(output_dir)
+            for png_file in tqdm.tqdm(png_files, position=1):
+                img = read_image(png_file, format="BGR")
+                start_time = time.time()
+                predictions, visualized_output = demo.run_on_image(img)
+                # logger.info(
+                #     "{}: {} in {:.2f}s".format(
+                #         png_file,
+                #         "detected {} instances".format(len(predictions["instances"]))
+                #         if "instances" in predictions
+                #         else "finished",
+                #         time.time() - start_time,
+                #     )
+                # )
+                out_filename = os.path.join(output_dir, os.path.basename(png_file))
+                out_filename_res = os.path.join(output_dir, os.path.basename(png_file) + ".res")
                 visualized_output.save(out_filename)
-                with open(out_filename_json, 'w') as file:
+                with open(out_filename_res, 'w') as file:
                     file.writelines("#  Number of instances\n")
                     file.writelines("{}\n".format(len(predictions["instances"])))
                     file.writelines("#  For each instanc: box | score | class\n")
                     for i in range(len(predictions["instances"])):
                         file.writelines("{}, {}, {}, {} | {} | {}\n".format(
                             predictions["instances"][i].pred_boxes.tensor[0][0], predictions["instances"][i].pred_boxes.tensor[0][1], predictions["instances"][i].pred_boxes.tensor[0][2], predictions["instances"][i].pred_boxes.tensor[0][3], predictions["instances"][i].scores[0], predictions["instances"][i].pred_classes[0]))
-            else:
-                cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-                cv2.imshow(WINDOW_NAME, visualized_output.get_image()[:, :, ::-1])
-                if cv2.waitKey(0) == 27:
-                    break  # esc to quit
-    elif args.webcam:
-        assert args.input is None, "Cannot have both --input and --webcam!"
-        assert args.output is None, "output not yet supported with --webcam!"
-        cam = cv2.VideoCapture(0)
-        for vis in tqdm.tqdm(demo.run_on_video(cam)):
-            cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-            cv2.imshow(WINDOW_NAME, vis)
-            if cv2.waitKey(1) == 27:
-                break  # esc to quit
-        cam.release()
-        cv2.destroyAllWindows()
-    elif args.video_input:
-        video = cv2.VideoCapture(args.video_input)
-        width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frames_per_second = video.get(cv2.CAP_PROP_FPS)
-        num_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-        basename = os.path.basename(args.video_input)
-
-        if args.output:
-            if os.path.isdir(args.output):
-                output_fname = os.path.join(args.output, basename)
-                output_fname = os.path.splitext(output_fname)[0] + ".mkv"
-            else:
-                output_fname = args.output
-            assert not os.path.isfile(output_fname), output_fname
-            output_file = cv2.VideoWriter(
-                filename=output_fname,
-                # some installation of opencv may not support x264 (due to its license),
-                # you can try other format (e.g. MPEG)
-                fourcc=cv2.VideoWriter_fourcc(*"x264"),
-                fps=float(frames_per_second),
-                frameSize=(width, height),
-                isColor=True,
-            )
-        assert os.path.isfile(args.video_input)
-        for vis_frame in tqdm.tqdm(demo.run_on_video(video), total=num_frames):
-            if args.output:
-                output_file.write(vis_frame)
-            else:
-                cv2.namedWindow(basename, cv2.WINDOW_NORMAL)
-                cv2.imshow(basename, vis_frame)
-                if cv2.waitKey(1) == 27:
-                    break  # esc to quit
-        video.release()
-        if args.output:
-            output_file.release()
-        else:
-            cv2.destroyAllWindows()
+            # create .result_directory file
+            Path(output_dir+"/.result_directory").touch()
